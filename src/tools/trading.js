@@ -462,3 +462,64 @@ export function registerTradingTools(server) {
       });
     } catch (err) { return jsonResult({ error: err.message }, true); }
   });
+
+  // ── Bookmap Live Data ────────────────────────────────────────────────────
+  server.tool('bookmap', 'Get LIVE Bookmap-style data — orderbook heatmap, large trade bubbles, walls, delta profile, absorption. Requires bookmap.py running locally.', {
+    view: z.enum(['all', 'heatmap', 'trades', 'walls', 'delta']).default('all').describe('Which data to fetch'),
+  }, async ({ view }) => {
+    try {
+      const endpoint = view === 'all' ? '/all' : `/${view}`;
+      const data = await fetchJSON(`http://127.0.0.1:5588${endpoint}`, 5000);
+      if (data.error) return jsonResult({ error: data.error, hint: 'Make sure bookmap.py is running: cd tradingview-mcp/bookmap && python bookmap.py' }, true);
+      return jsonResult(data);
+    } catch (err) {
+      return jsonResult({ 
+        error: 'Bookmap server not running',
+        hint: 'Start it with: cd ~/tradingview-mcp/bookmap && pip install websockets aiohttp && python bookmap.py',
+      }, true);
+    }
+  });
+
+  // ── Bookmap + Chart Overlay ──────────────────────────────────────────────
+  server.tool('bookmap_draw', 'Fetch live Bookmap data and give instructions to draw walls, bubbles, and delta on the TradingView chart', {}, async () => {
+    try {
+      const data = await fetchJSON('http://127.0.0.1:5588/all', 5000);
+      const instructions = [];
+      
+      // Draw active walls
+      if (data.walls?.active_walls) {
+        for (const w of data.walls.active_walls.slice(0, 6)) {
+          const price = w.price.replace('$', '').replace(',', '');
+          const color = w.side.includes('BID') ? 'green' : 'red';
+          const label = w.side.includes('BID') ? `BID WALL ${w.size}` : `ASK WALL ${w.size}`;
+          instructions.push(`Draw ${color} horizontal line at ${w.price} labeled "${label} | absorbed ${w.absorbed} | age ${w.age}"`);
+        }
+      }
+      
+      // Large trade annotations
+      if (data.large_trades?.trades) {
+        const summary = `${data.large_trades.buy_count} buys (${data.large_trades.buy_volume}) vs ${data.large_trades.sell_count} sells (${data.large_trades.sell_volume}) | Net: ${data.large_trades.net_delta}`;
+        instructions.push(`Add text label near current price: "${summary}"`);
+      }
+      
+      // Delta profile summary
+      if (data.delta_profile?.net_delta) {
+        instructions.push(`Delta: ${data.delta_profile.net_delta} net | Buys: ${data.delta_profile.total_buy} Sells: ${data.delta_profile.total_sell}`);
+      }
+      
+      return jsonResult({
+        message: 'Live Bookmap data retrieved. Use tv_draw tools to annotate chart:',
+        instructions,
+        raw_walls: data.walls?.active_walls?.slice(0, 6),
+        raw_trades_summary: data.large_trades ? {
+          buys: data.large_trades.buy_count,
+          sells: data.large_trades.sell_count,
+          net: data.large_trades.net_delta,
+          biggest: data.large_trades.trades?.[0],
+        } : null,
+        raw_delta: data.delta_profile?.net_delta,
+      });
+    } catch {
+      return jsonResult({ error: 'Bookmap not running. Start: cd ~/tradingview-mcp/bookmap && python bookmap.py' }, true);
+    }
+  });
