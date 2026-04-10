@@ -297,3 +297,168 @@ export function registerTradingTools(server) {
     } catch (err) { return jsonResult({ error: err.message }, true); }
   });
 }
+
+  // ── Bookmap-style Orderflow Overlay ──────────────────────────────────────
+  server.tool('orderflow_overlay', 'Draw Bookmap-style bubbles and walls on your TradingView chart — shows large trades, bid/ask walls, and liquidation levels as chart annotations', {
+    symbol: z.string().default('BTCUSDT').describe('Trading pair'),
+    min_trade_btc: z.number().default(1).describe('Minimum trade size in BTC to show as bubble'),
+    show_walls: z.coerce.boolean().default(true).describe('Draw horizontal lines at orderbook walls'),
+    show_liquidations: z.coerce.boolean().default(true).describe('Draw liquidation levels'),
+  }, async ({ symbol, min_trade_btc, show_walls, show_liquidations }) => {
+    try {
+      const results = { bubbles: [], walls: [], liquidations: [] };
+      
+      // 1. Get recent large trades from Bybit
+      const tradeData = await fetchJSON(`${BYBIT_REST}/v5/market/recent-trade?category=linear&symbol=${symbol}&limit=500`);
+      if (tradeData.retCode === 0) {
+        const trades = tradeData.result.list || [];
+        const largeTrades = trades.filter(t => +t.size >= min_trade_btc);
+        
+        for (const t of largeTrades.slice(0, 20)) {
+          const size = +t.size;
+          const price = +t.price;
+          const side = t.side; // Buy or Sell
+          const usd = (size * price).toFixed(0);
+          
+          results.bubbles.push({
+            price: `$${price.toLocaleString()}`,
+            size: `${size.toFixed(3)} BTC ($${(+usd).toLocaleString()})`,
+            side: side === 'Buy' ? '🟢 BUY (aggressive buyer)' : '🔴 SELL (aggressive seller)',
+            emoji: side === 'Buy' ? '🟢' : '🔴',
+          });
+        }
+      }
+      
+      // 2. Get orderbook walls
+      if (show_walls) {
+        const obData = await fetchJSON(`${BYBIT_REST}/v5/market/orderbook?category=linear&symbol=${symbol}&limit=50`);
+        if (obData.retCode === 0) {
+          const bids = obData.result.b.map(([p, s]) => ({ price: +p, size: +s }));
+          const asks = obData.result.a.map(([p, s]) => ({ price: +p, size: +s }));
+          
+          const avgBid = bids.reduce((s, b) => s + b.size, 0) / bids.length;
+          const avgAsk = asks.reduce((s, a) => s + a.size, 0) / asks.length;
+          
+          // Walls = levels with >3x average size
+          const bidWalls = bids.filter(b => b.size > avgBid * 3).slice(0, 5);
+          const askWalls = asks.filter(a => a.size > avgAsk * 3).slice(0, 5);
+          
+          for (const w of bidWalls) {
+            results.walls.push({
+              price: `$${w.price.toLocaleString()}`,
+              size: `${w.size.toFixed(3)} BTC`,
+              type: '🟢 BID WALL (support)',
+              strength: `${(w.size / avgBid).toFixed(1)}x average`,
+              instruction: `Draw a green horizontal line at $${w.price} with label "BID WALL ${w.size.toFixed(1)} BTC"`,
+            });
+          }
+          for (const w of askWalls) {
+            results.walls.push({
+              price: `$${w.price.toLocaleString()}`,
+              size: `${w.size.toFixed(3)} BTC`,
+              type: '🔴 ASK WALL (resistance)',
+              strength: `${(w.size / avgAsk).toFixed(1)}x average`,
+              instruction: `Draw a red horizontal line at $${w.price} with label "ASK WALL ${w.size.toFixed(1)} BTC"`,
+            });
+          }
+        }
+      }
+      
+      // 3. Liquidation levels
+      if (show_liquidations) {
+        const [oiData, tickerData] = await Promise.all([
+          fetchJSON(`${BYBIT_REST}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=5min&limit=1`),
+          fetchJSON(`${BYBIT_REST}/v5/market/tickers?category=linear&symbol=${symbol}`),
+        ]);
+        
+        if (oiData.retCode === 0 && tickerData.retCode === 0) {
+          const oi = +oiData.result.list[0].openInterest;
+          const price = +tickerData.result.list[0].lastPrice;
+          
+          const keyLevels = [
+            { lev: 10, pct: 0.30 },
+            { lev: 25, pct: 0.30 },
+            { lev: 50, pct: 0.25 },
+          ];
+          
+          for (const { lev, pct } of keyLevels) {
+            const longLiq = price * (1 - 1/lev);
+            const shortLiq = price * (1 + 1/lev);
+            const usdM = (oi * pct * price / 1e6).toFixed(0);
+            
+            results.liquidations.push({
+              leverage: `${lev}x`,
+              longLiq: `$${longLiq.toFixed(0)}`,
+              shortLiq: `$${shortLiq.toFixed(0)}`,
+              usdAtRisk: `$${usdM}M`,
+              drawLong: `Draw orange dashed line at $${longLiq.toFixed(0)} with label "LONG LIQ ${lev}x ($${usdM}M)"`,
+              drawShort: `Draw purple dashed line at $${shortLiq.toFixed(0)} with label "SHORT LIQ ${lev}x ($${usdM}M)"`,
+            });
+          }
+        }
+      }
+      
+      // Summary
+      const summary = {
+        largeTrades: `${results.bubbles.length} trades ≥ ${min_trade_btc} BTC in last 500`,
+        buyPressure: results.bubbles.filter(b => b.side.includes('BUY')).length,
+        sellPressure: results.bubbles.filter(b => b.side.includes('SELL')).length,
+        walls: `${results.walls.length} walls detected`,
+        liquidationLevels: `${results.liquidations.length} key levels`,
+        instructions: 'Use tv_draw_line to draw the walls and liquidation levels on your chart. Use tv_draw_label for trade bubbles.',
+      };
+      
+      return jsonResult({ summary, ...results });
+    } catch (err) { return jsonResult({ error: err.message }, true); }
+  });
+
+  // ── Auto-Draw Levels ─────────────────────────────────────────────────────
+  server.tool('auto_draw_levels', 'Automatically draw orderbook walls and liquidation levels on your TradingView chart. Call this and it will use tv_draw tools to annotate your chart.', {
+    symbol: z.string().default('BTCUSDT'),
+  }, async ({ symbol }) => {
+    try {
+      // Get all the data
+      const [obData, oiData, tickerData] = await Promise.all([
+        fetchJSON(`${BYBIT_REST}/v5/market/orderbook?category=linear&symbol=${symbol}&limit=50`),
+        fetchJSON(`${BYBIT_REST}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=5min&limit=1`),
+        fetchJSON(`${BYBIT_REST}/v5/market/tickers?category=linear&symbol=${symbol}`),
+      ]);
+      
+      const instructions = [];
+      
+      // Orderbook walls
+      if (obData.retCode === 0) {
+        const bids = obData.result.b.map(([p, s]) => ({ price: +p, size: +s }));
+        const asks = obData.result.a.map(([p, s]) => ({ price: +p, size: +s }));
+        const avgBid = bids.reduce((s, b) => s + b.size, 0) / bids.length;
+        const avgAsk = asks.reduce((s, a) => s + a.size, 0) / asks.length;
+        
+        const bigBids = bids.filter(b => b.size > avgBid * 3).slice(0, 3);
+        const bigAsks = asks.filter(a => a.size > avgAsk * 3).slice(0, 3);
+        
+        for (const w of bigBids) {
+          instructions.push(`Draw a GREEN horizontal ray at $${w.price} labeled "BID ${w.size.toFixed(1)} BTC" using tv_draw_line`);
+        }
+        for (const w of bigAsks) {
+          instructions.push(`Draw a RED horizontal ray at $${w.price} labeled "ASK ${w.size.toFixed(1)} BTC" using tv_draw_line`);
+        }
+      }
+      
+      // Liquidation levels
+      if (oiData.retCode === 0 && tickerData.retCode === 0) {
+        const price = +tickerData.result.list[0].lastPrice;
+        for (const lev of [10, 25, 50]) {
+          const longLiq = price * (1 - 1/lev);
+          const shortLiq = price * (1 + 1/lev);
+          instructions.push(`Draw an ORANGE dashed horizontal ray at $${longLiq.toFixed(0)} labeled "LONG LIQ ${lev}x"`);
+          instructions.push(`Draw a PURPLE dashed horizontal ray at $${shortLiq.toFixed(0)} labeled "SHORT LIQ ${lev}x"`);
+        }
+      }
+      
+      return jsonResult({
+        message: 'Execute these drawing instructions on the chart:',
+        instructions,
+        note: 'Use tv_draw_line for each instruction. Colors: green=support, red=resistance, orange=long liquidations, purple=short liquidations',
+      });
+    } catch (err) { return jsonResult({ error: err.message }, true); }
+  });
