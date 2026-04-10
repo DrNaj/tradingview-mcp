@@ -523,3 +523,36 @@ export function registerTradingTools(server) {
       return jsonResult({ error: 'Bookmap not running. Start: cd ~/tradingview-mcp/bookmap && python bookmap.py' }, true);
     }
   });
+
+  // ── Bookmap File Bridge ──────────────────────────────────────────────────
+  server.tool('bookmap_live', 'Read LIVE Bookmap data — real depth, walls, large trades, delta from actual Bookmap. Requires Bookmap file bridge addon running.', {
+    section: z.enum(['all', 'depth', 'walls', 'trades', 'delta']).default('all').describe('Which section to read'),
+  }, async ({ section }) => {
+    try {
+      const fs = await import('fs/promises');
+      const os = await import('os');
+      const filePath = os.homedir() + '/.bookmap_live.json';
+      
+      const raw = await fs.readFile(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      
+      // Check if data is stale (>30 seconds old)
+      const age = Date.now() / 1000 - (data.updated || 0);
+      if (age > 30) {
+        return jsonResult({ warning: `Data is ${age.toFixed(0)}s old — Bookmap bridge may not be running`, data });
+      }
+      
+      if (section === 'all') return jsonResult(data);
+      if (section === 'depth') return jsonResult({ source: data.source, mid: data.mid_price, ...data.depth });
+      if (section === 'walls') return jsonResult({ source: data.source, mid: data.mid_price, ...data.walls });
+      if (section === 'trades') return jsonResult({ source: data.source, mid: data.mid_price, ...data.large_trades });
+      if (section === 'delta') return jsonResult({ source: data.source, mid: data.mid_price, ...data.delta });
+      return jsonResult(data);
+    } catch (err) {
+      return jsonResult({
+        error: 'Bookmap data file not found',
+        hint: 'In Bookmap: load bookmap_file_bridge.py as a Python addon, enable it on your chart. It writes to ~/.bookmap_live.json',
+        detail: err.message,
+      }, true);
+    }
+  });
