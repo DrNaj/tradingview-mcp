@@ -11,6 +11,10 @@ Install:
   3. Enable it
   4. Claude MCP reads from http://localhost:5588
 """
+import sys
+import os
+# Ensure we import the bookmap PACKAGE, not our local bookmap.py
+sys.path = [p for p in sys.path if os.path.basename(p) != 'bookmap']
 import bookmap as bm
 import threading
 import json
@@ -45,15 +49,28 @@ state_lock = threading.Lock()
 
 # ── Bookmap Callbacks ─────────────────────────────────────────────────────────
 
-def on_instrument(instrument):
-    """Called when instrument info is available."""
+def on_subscribe(addon, alias, full_name, is_crypto, pips, size_multiplier, 
+                  instrument_multiplier, supported_features):
+    """Called when instrument is subscribed."""
     with state_lock:
-        state["symbol"] = str(instrument)
+        state["symbol"] = alias
         state["connected"] = True
-    print(f"[BRIDGE] Instrument: {instrument}")
+        state["pips"] = pips
+    print(f"[BRIDGE] Subscribed: {alias} ({full_name})")
+    
+    # Register event handlers
+    bm.subscribe_to_depth(addon, on_depth_handler)
+    bm.subscribe_to_trades(addon, on_trade_handler)
 
 
-def on_depth(is_bid, price, size):
+def on_unsubscribe(addon, alias):
+    """Called when instrument is unsubscribed."""
+    with state_lock:
+        state["connected"] = False
+    print(f"[BRIDGE] Unsubscribed: {alias}")
+
+
+def on_depth_handler(addon, alias, is_bid, price, size):
     """Called on every orderbook update."""
     with state_lock:
         book = state["bids"] if is_bid else state["asks"]
@@ -83,7 +100,7 @@ def on_depth(is_bid, price, size):
             snapshots.append(snap)
 
 
-def on_trade(is_bid, price, size):
+def on_trade_handler(addon, alias, is_bid, price, size):
     """Called on every trade."""
     side = "Buy" if is_bid else "Sell"
     now = time.time()
@@ -312,16 +329,10 @@ def start_http():
 
 # ── Bookmap Addon Entry Point ─────────────────────────────────────────────────
 
-def main():
+if __name__ == "__main__":
     print("[BRIDGE] Bookmap → Claude MCP Bridge starting...")
     start_http()
     
-    addon = bm.Addon()
-    addon.on_instrument_info = on_instrument
-    addon.on_depth = on_depth
-    addon.on_trade = on_trade
-    addon.start()
-
-
-if __name__ == "__main__":
-    main()
+    addon = bm.create_addon()
+    bm.start_addon(addon, on_subscribe, on_unsubscribe)
+    print("[BRIDGE] Addon started — waiting for instrument subscription in Bookmap")
