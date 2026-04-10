@@ -296,7 +296,7 @@ export function registerTradingTools(server) {
       return jsonResult({ scan: results, timestamp: new Date().toISOString() });
     } catch (err) { return jsonResult({ error: err.message }, true); }
   });
-}
+
 
   // ── Bookmap-style Orderflow Overlay ──────────────────────────────────────
   server.tool('orderflow_overlay', 'Draw Bookmap-style bubbles and walls on your TradingView chart — shows large trades, bid/ask walls, and liquidation levels as chart annotations', {
@@ -556,3 +556,4 @@ export function registerTradingTools(server) {
       }, true);
     }
   });
+}
